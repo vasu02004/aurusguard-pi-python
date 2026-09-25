@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import threading
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -29,6 +30,10 @@ SERIAL_DELIMITER = os.environ.get('SERIAL_DELIMITER', '\\n').encode().decode('un
 # Streaming + heartbeat config
 STREAM_INTERVAL_MS = int(os.environ.get('STREAM_INTERVAL_MS', '1500'))
 STREAM_CEILING_MS = int(os.environ.get('STREAM_CEILING_MS', '180000'))
+
+# Fallback for single-value frames (e.g. Aczet: "enter.!G            372.37") — matches the
+# trailing "<mode letter><spaces><number>" regardless of what junk precedes it on the line.
+SINGLE_VALUE_FRAME_PATTERN = re.compile(r'([A-Za-z])\s+(-?\d+(?:\.\d+)?)\s*$')
 HEARTBEAT_INTERVAL_MS = 60000
 
 # =====================================
@@ -168,8 +173,23 @@ def serial_reader_loop():
                         except ValueError:
                             log('WARN', f'Unparseable frame fields: {raw_string}')
                     else:
-                        # Fallback: unexpected frame shape, log it so it can be investigated
-                        log('WARN', f'Unexpected frame (expected 3 fields): {raw_string}')
+                        # Single-value protocol (e.g. Aczet): "<junk><mode letter><spaces><number>".
+                        match = SINGLE_VALUE_FRAME_PATTERN.search(raw_string)
+                        if match:
+                            mode, value = match.group(1).upper(), float(match.group(2))
+                            if mode == 'G':
+                                gross_weight = value
+                                net_weight = gross_weight - tare_weight  # indicator doesn't stream Net separately
+                            elif mode == 'N':
+                                net_weight = value
+                            elif mode == 'T':
+                                tare_weight = value
+                                net_weight = gross_weight - tare_weight
+                            else:
+                                log('WARN', f'Unrecognized weight mode "{mode}" in frame: {raw_string}')
+                        else:
+                            # Fallback: unexpected frame shape, log it so it can be investigated
+                            log('WARN', f'Unexpected frame (expected 3 fields): {raw_string}')
             except Exception as err:
                 log('ERROR', f'Scale Parse Error: {err}')
     finally:
