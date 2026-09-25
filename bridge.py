@@ -22,6 +22,9 @@ BRANCH_ID = os.environ.get('BRANCH_ID')
 
 SERIAL_PORT_PATH = os.environ.get('SERIAL_PORT_PATH', '/dev/ttyUSB0')
 BAUDRATE = int(os.environ.get('BAUDRATE', '9600'))
+# Frame terminator sent by the scale. Supports escape sequences (e.g. '\x1b' for
+# ESC-terminated protocols like Aczet) since .env values are read as literal text.
+SERIAL_DELIMITER = os.environ.get('SERIAL_DELIMITER', '\\n').encode().decode('unicode_escape').encode('latin-1')
 
 # Streaming + heartbeat config
 STREAM_INTERVAL_MS = int(os.environ.get('STREAM_INTERVAL_MS', '1500'))
@@ -48,6 +51,7 @@ def iso_now():
 log('INFO', 'Scale Bridge Starting')
 log('INFO', f'Branch ID: {BRANCH_ID}')
 log('INFO', f'Serial Port: {SERIAL_PORT_PATH}')
+log('INFO', f'Serial Delimiter: {SERIAL_DELIMITER!r}')
 log('INFO', f'MQTT Broker: {MQTT_BROKER}')
 
 # =====================================
@@ -125,21 +129,32 @@ def serial_reader_loop():
     is_scale_connected = True
     log('INFO', 'Serial Port Connected')
 
+    # Manual delimiter-based framing (not ser.readline(), which only ever stops at '\n') —
+    # some indicators (e.g. Aczet) terminate frames with a non-newline byte like ESC (\x1b).
+    buffer = bytearray()
+    delimiter_len = len(SERIAL_DELIMITER)
+
     try:
         while True:
             try:
-                raw_line = ser.readline()
+                byte = ser.read(1)
             except Exception as err:
                 is_scale_connected = False
                 log('ERROR', f'Serial Error: {err}')
                 break
 
-            if not raw_line:
+            if not byte:
+                continue
+
+            is_scale_connected = True
+            buffer += byte
+
+            if not buffer.endswith(SERIAL_DELIMITER):
                 continue
 
             try:
-                is_scale_connected = True
-                raw_string = raw_line.decode(errors='replace').strip()
+                raw_string = bytes(buffer[:-delimiter_len]).decode(errors='replace').strip()
+                buffer.clear()
 
                 if raw_string:
                     fields = [f.strip() for f in raw_string.split('\r')]
