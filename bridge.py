@@ -1,6 +1,5 @@
 import json
 import os
-import re
 import threading
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -23,17 +22,10 @@ BRANCH_ID = os.environ.get('BRANCH_ID')
 
 SERIAL_PORT_PATH = os.environ.get('SERIAL_PORT_PATH', '/dev/ttyUSB0')
 BAUDRATE = int(os.environ.get('BAUDRATE', '9600'))
-# Frame terminator sent by the scale. Supports escape sequences (e.g. '\x1b' for
-# ESC-terminated protocols like Aczet) since .env values are read as literal text.
-SERIAL_DELIMITER = os.environ.get('SERIAL_DELIMITER', '\\n').encode().decode('unicode_escape').encode('latin-1')
 
 # Streaming + heartbeat config
 STREAM_INTERVAL_MS = int(os.environ.get('STREAM_INTERVAL_MS', '1500'))
 STREAM_CEILING_MS = int(os.environ.get('STREAM_CEILING_MS', '180000'))
-
-# Fallback for single-value frames (e.g. Aczet: "enter.!G            372.37") — matches the
-# trailing "<mode letter><spaces><number>" regardless of what junk precedes it on the line.
-SINGLE_VALUE_FRAME_PATTERN = re.compile(r'([A-Za-z])\s+(-?\d+(?:\.\d+)?)\s*$')
 HEARTBEAT_INTERVAL_MS = 60000
 
 # =====================================
@@ -56,7 +48,6 @@ def iso_now():
 log('INFO', 'Scale Bridge Starting')
 log('INFO', f'Branch ID: {BRANCH_ID}')
 log('INFO', f'Serial Port: {SERIAL_PORT_PATH}')
-log('INFO', f'Serial Delimiter: {SERIAL_DELIMITER!r}')
 log('INFO', f'MQTT Broker: {MQTT_BROKER}')
 
 # =====================================
@@ -134,32 +125,21 @@ def serial_reader_loop():
     is_scale_connected = True
     log('INFO', 'Serial Port Connected')
 
-    # Manual delimiter-based framing (not ser.readline(), which only ever stops at '\n') —
-    # some indicators (e.g. Aczet) terminate frames with a non-newline byte like ESC (\x1b).
-    buffer = bytearray()
-    delimiter_len = len(SERIAL_DELIMITER)
-
     try:
         while True:
             try:
-                byte = ser.read(1)
+                raw_line = ser.readline()
             except Exception as err:
                 is_scale_connected = False
                 log('ERROR', f'Serial Error: {err}')
                 break
 
-            if not byte:
-                continue
-
-            is_scale_connected = True
-            buffer += byte
-
-            if not buffer.endswith(SERIAL_DELIMITER):
+            if not raw_line:
                 continue
 
             try:
-                raw_string = bytes(buffer[:-delimiter_len]).decode(errors='replace').strip()
-                buffer.clear()
+                is_scale_connected = True
+                raw_string = raw_line.decode(errors='replace').strip()
 
                 if raw_string:
                     fields = [f.strip() for f in raw_string.split('\r')]
@@ -173,23 +153,8 @@ def serial_reader_loop():
                         except ValueError:
                             log('WARN', f'Unparseable frame fields: {raw_string}')
                     else:
-                        # Single-value protocol (e.g. Aczet): "<junk><mode letter><spaces><number>".
-                        match = SINGLE_VALUE_FRAME_PATTERN.search(raw_string)
-                        if match:
-                            mode, value = match.group(1).upper(), float(match.group(2))
-                            if mode == 'G':
-                                gross_weight = value
-                                net_weight = gross_weight - tare_weight  # indicator doesn't stream Net separately
-                            elif mode == 'N':
-                                net_weight = value
-                            elif mode == 'T':
-                                tare_weight = value
-                                net_weight = gross_weight - tare_weight
-                            else:
-                                log('WARN', f'Unrecognized weight mode "{mode}" in frame: {raw_string}')
-                        else:
-                            # Fallback: unexpected frame shape, log it so it can be investigated
-                            log('WARN', f'Unexpected frame (expected 3 fields): {raw_string}')
+                        # Fallback: unexpected frame shape, log it so it can be investigated
+                        log('WARN', f'Unexpected frame (expected 3 fields): {raw_string}')
             except Exception as err:
                 log('ERROR', f'Scale Parse Error: {err}')
     finally:
